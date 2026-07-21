@@ -4,7 +4,7 @@ from tinygrad.helpers import getenv, DEBUG, getbits, round_up
 from tinygrad.runtime.autogen import pci
 from tinygrad.runtime.support.memory import TLSFAllocator, MemoryManager, AddrSpace
 from tinygrad.runtime.support.nv.ip import NV_FLCN, NV_FLCN_COT, NV_GSP
-from tinygrad.runtime.support.system import PCIDevice
+from tinygrad.runtime.support.system import PCIDevice, APLRemotePCIDevice
 from tinygrad.runtime.support.hcq import MMIOInterface
 
 NV_DEBUG = getenv("NV_DEBUG", 0)
@@ -102,11 +102,7 @@ class NVDev:
     self.include("dev_fb", "tu102")
     self.include("dev_gc6_island", "ga102")
 
-    if self.reg("NV_PFB_PRI_MMU_WPR2_ADDR_HI").read() != 0:
-      self.pci_dev.write_config_flush(pci.PCI_COMMAND, self.pci_dev.read_config(pci.PCI_COMMAND, 2) & ~pci.PCI_COMMAND_MASTER, 2)
-      if DEBUG >= 2: print(f"nv {self.devfmt}: WPR2 is up. Issuing a full reset.", flush=True)
-      self.pci_dev.reset()
-      time.sleep(0.1) # wait until device can respond again
+    self._reset_if_wpr2_up()
 
     self.pci_dev.write_config_flush(pci.PCI_COMMAND, self.pci_dev.read_config(pci.PCI_COMMAND, 2) | pci.PCI_COMMAND_MASTER, 2)
     self.chip_id = self.reg("NV_PMC_BOOT_0").read()
@@ -119,6 +115,16 @@ class NVDev:
     self.gsp:NV_GSP = NV_GSP(self)
 
     self.flcn.wait_for_reset()
+
+  def _reset_if_wpr2_up(self):
+    if self.reg("NV_PFB_PRI_MMU_WPR2_ADDR_HI").read() == 0: return
+    if isinstance(self.pci_dev, APLRemotePCIDevice) and not getenv("TINYGPU_FORCE_RESET", 0):
+      raise RuntimeError("TinyGPU PCI reset blocked: WPR2 is already active. Keep one long-lived tinygrad process, or shut down the host and "
+                         "power-cycle the eGPU before retrying. Set TINYGPU_FORCE_RESET=1 only to explicitly allow the unsafe reset.")
+    self.pci_dev.write_config_flush(pci.PCI_COMMAND, self.pci_dev.read_config(pci.PCI_COMMAND, 2) & ~pci.PCI_COMMAND_MASTER, 2)
+    if DEBUG >= 2: print(f"nv {self.devfmt}: WPR2 is up. Issuing a full reset.", flush=True)
+    self.pci_dev.reset()
+    time.sleep(0.1) # wait until device can respond again
 
   def _early_mmu_init(self):
     self.include("dev_vm", "tu102")
